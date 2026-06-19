@@ -917,7 +917,24 @@ function createParticles(){
         function updateComboDisplay(s){ const n=document.getElementById('combo-number'),l=document.getElementById('combo-label'),m=document.getElementById('combo-multiplier'); if(s>=3){n.textContent=s;n.classList.add('show');l.classList.add('show');m.textContent=s>=5?'2x XP':'1.5x XP';m.classList.add('show');}else{n.classList.remove('show');l.classList.remove('show');m.classList.remove('show');} }
 
         // ==================== LOCAL STORAGE ====================
-        function saveProgress(){ if(!GameEngine.player) return; const rp={};Object.keys(GameEngine.realmProgress).forEach(k=>{rp[k]=GameEngine.realmProgress[k];}); const d={player:{...GameEngine.player,realmsPlayed:GameEngine.player.realmsPlayed?Array.from(GameEngine.player.realmsPlayed):[]},achievements:Array.from(unlockedAchievements),realmProgress:rp}; localStorage.setItem('codequest_save',JSON.stringify(d)); }
+function saveProgress(){
+  if(!GameEngine.player) return;
+  const rp = {};
+  Object.keys(GameEngine.player.realmProgress || {}).forEach(k => {
+    rp[k] = GameEngine.player.realmProgress[k];
+  });
+  const d = {
+    player: {
+      ...GameEngine.player,
+      realmsPlayed: GameEngine.player.realmsPlayed
+        ? Array.from(GameEngine.player.realmsPlayed)
+        : []
+    },
+    achievements: Array.from(unlockedAchievements),
+    realmProgress: rp
+  };
+  localStorage.setItem('codequest_save', JSON.stringify(d));
+}
         function loadProgress(){ const s=localStorage.getItem('codequest_save'); if(s){try{const d=JSON.parse(s);if(d.player.realmsPlayed)d.player.realmsPlayed=new Set(d.player.realmsPlayed);return d;}catch(e){}} return null; }
         function hasSaveData(){ return localStorage.getItem('codequest_save')!==null; }
 
@@ -1487,11 +1504,61 @@ const GameEngine = {
   player: null,
   currentBattle: null,
 
-  init() {
-    const saved = localStorage.getItem('codequest_save');
-    if (saved) { try { this.player = JSON.parse(saved); return true; } catch(e) { localStorage.removeItem('codequest_save'); } }
-    return false;
-  },
+init() {
+  const saved = localStorage.getItem('codequest_save');
+  if (saved) {
+    try {
+      let data = JSON.parse(saved);
+
+      // Handle the wrapper format produced by saveProgress()
+      if (data && data.player && data.realmProgress) {
+        data = { ...data.player, realmProgress: data.realmProgress };
+      }
+
+      this.player = data;
+
+      // Defensive: make sure core fields exist
+      if (!this.player.realmProgress) this.player.realmProgress = {};
+      if (!this.player.realmsCompleted) this.player.realmsCompleted = [];
+      if (!this.player.questionHistory) this.player.questionHistory = [];
+      if (typeof this.player.totalCorrect !== 'number') this.player.totalCorrect = 0;
+      if (typeof this.player.totalAnswered !== 'number') this.player.totalAnswered = 0;
+      if (typeof this.player.bestStreak !== 'number') this.player.bestStreak = 0;
+      if (typeof this.player.level !== 'number') this.player.level = 1;
+      if (typeof this.player.xp !== 'number') this.player.xp = 0;
+      if (typeof this.player.xpToNext !== 'number') this.player.xpToNext = this.calcXpToNext(1);
+      if (typeof this.player.hp !== 'number' || typeof this.player.maxHp !== 'number') {
+        this.player.hp = 100; this.player.maxHp = 100;
+      }
+      if (!this.player.class) this.player.class = 'fullstack';
+      if (!this.player.classLabel) this.player.classLabel = 'Full Stack Paladin';
+
+      // 🔑 KEY FIX: Ensure EVERY realm has a progress entry
+      REALMS.forEach(r => {
+        if (!this.player.realmProgress[r.id]) {
+          this.player.realmProgress[r.id] = {
+            correct: 0, total: 0, bestStreak: 0, completed: false
+          };
+        } else {
+          // Repair any missing sub-fields
+          const rp = this.player.realmProgress[r.id];
+          if (typeof rp.correct !== 'number') rp.correct = 0;
+          if (typeof rp.total !== 'number') rp.total = 0;
+          if (typeof rp.bestStreak !== 'number') rp.bestStreak = 0;
+          if (typeof rp.completed !== 'boolean') rp.completed = false;
+        }
+      });
+
+      // Persist the repaired structure so we don't keep doing this
+      this.save();
+      return true;
+    } catch (e) {
+      console.error('Failed to load save:', e);
+      localStorage.removeItem('codequest_save');
+    }
+  }
+  return false;
+},
 
   save() { if (this.player) localStorage.setItem('codequest_save', JSON.stringify(this.player)); },
 
@@ -1631,28 +1698,46 @@ const GameEngine = {
   },
 
   isRealmUnlocked(realmId) {
-    if (realmId === 0) return true;
-    const prev = this.player.realmProgress[realmId - 1];
-    const prevTotal = QBANK[realmId - 1] ? QBANK[realmId - 1].length : 1;
-    return prev && (prev.total >= prevTotal * 0.4);
-  },
+  if (realmId === 0) return true;
+  const prev = this.player.realmProgress[realmId - 1];
+  if (!prev) return false;
+  const prevTotal = QBANK[realmId - 1] ? QBANK[realmId - 1].length : 1;
+  return (prev.total || 0) >= prevTotal * 0.4;
+ },
 
-  getTotalProgress() {
-    let total = 0, correct = 0;
-    REALMS.forEach((_, i) => { const rp = this.player.realmProgress[i]; total += rp.total; correct += rp.correct; });
-    return { total, correct, pct: total > 0 ? Math.round(correct / total * 100) : 0 };
-  },
+getTotalProgress() {
+  let total = 0, correct = 0;
+  REALMS.forEach((_, i) => {
+    const rp = this.player.realmProgress[i];
+    if (rp) {
+      total += rp.total || 0;
+      correct += rp.correct || 0;
+    }
+  });
+  return { total, correct, pct: total > 0 ? Math.round(correct / total * 100) : 0 };
+},
 
-  getStats() {
-    const prog = this.getTotalProgress();
-    const accuracy = this.player.totalAnswered > 0 ? Math.round(this.player.totalCorrect / this.player.totalAnswered * 100) : 0;
-    const realmStats = REALMS.map((r, i) => {
-      const rp = this.player.realmProgress[i];
-      const total = QBANK[i] ? QBANK[i].length : 0;
-      return { ...r, correct: rp.correct, total: rp.total, bestStreak: rp.bestStreak, completed: rp.completed, pct: rp.total > 0 ? Math.round(rp.correct / rp.total * 100) : 0, totalQuestions: total, unlocked: this.isRealmUnlocked(i) };
-    });
-    return { ...this.player, accuracy, overallProgress: prog, realmStats };
-  },
+getStats() {
+  const prog = this.getTotalProgress();
+  const accuracy = this.player.totalAnswered > 0
+    ? Math.round(this.player.totalCorrect / this.player.totalAnswered * 100)
+    : 0;
+  const realmStats = REALMS.map((r, i) => {
+    const rp = this.player.realmProgress[i] || { correct: 0, total: 0, bestStreak: 0, completed: false };
+    const total = QBANK[i] ? QBANK[i].length : 0;
+    return {
+      ...r,
+      correct: rp.correct || 0,
+      total: rp.total || 0,
+      bestStreak: rp.bestStreak || 0,
+      completed: !!rp.completed,
+      pct: rp.total > 0 ? Math.round(rp.correct / rp.total * 100) : 0,
+      totalQuestions: total,
+      unlocked: this.isRealmUnlocked(i)
+    };
+  });
+  return { ...this.player, accuracy, overallProgress: prog, realmStats };
+},
 
   resetGame() { this.player = null; this.currentBattle = null; localStorage.removeItem('codequest_save'); }
 };
@@ -1721,7 +1806,7 @@ function initMapScreen() {
   var grid = document.getElementById('realm-grid');
   grid.innerHTML = '';
   REALMS.forEach(function(realm, i) {
-    var rp = p.realmProgress[i];
+    var rp = p.realmProgress[i] || { correct: 0, total: 0, bestStreak: 0, completed: false };
     var unlocked = GameEngine.isRealmUnlocked(i);
     var completed = rp.completed;
     var pct = rp.total > 0 ? Math.round(rp.correct / rp.total * 100) : 0;
